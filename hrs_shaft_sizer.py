@@ -407,9 +407,9 @@ def build_gamma_report_text(ss, best, fan_sel, ctrl) -> str:
 
     text = f"""## PAGE 1 — COVER PAGE
 
-# HRS EXHAUST SHAFT SIZING REPORT
+# MES EXHAUST SHAFT SIZING REPORT
 
-### High-Rise Shaft Constant Pressure System
+### Multi-Family Shaft Constant Pressure System
 
 **Project:** {project_name}
 **Location:** {project_location}
@@ -643,19 +643,32 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
 
     buf = io.BytesIO()
 
-    # Custom page builder for cover page background
+    # ── Logo path for cover page ──
+    _logo_path = ""
+    for _lp in [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "lf_logo.png"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "LF_Systems-Horizontal-Logo-RGB-1000__1_.png"),
+        "/home/claude/lf_logo.png",
+    ]:
+        if os.path.exists(_lp):
+            _logo_path = _lp
+            break
+
+    # Custom page builder: cover page — white bg, logo top-left, red bar bottom
     def cover_page_bg(canvas, doc):
-        """Draw the dark navy cover page background."""
         canvas.saveState()
         w, h = letter
-        # Full page dark navy
-        canvas.setFillColor(NAVY)
-        canvas.rect(0, 0, w, h, fill=1, stroke=0)
-        # Red accent bar at bottom
+        # Red accent bar at very bottom
         canvas.setFillColor(RED)
-        canvas.rect(0, 0, w, 8, fill=1, stroke=0)
-        # Red accent bar at top
-        canvas.rect(0, h - 8, w, 8, fill=1, stroke=0)
+        canvas.rect(0, 0, w, 10, fill=1, stroke=0)
+        # LF Systems logo top-left
+        if _logo_path:
+            try:
+                canvas.drawImage(_logo_path, 0.6*inch, h - 1.1*inch,
+                                 width=2.8*inch, height=0.7*inch,
+                                 preserveAspectRatio=True, anchor='nw', mask='auto')
+            except Exception:
+                pass
         canvas.restoreState()
 
     def later_pages_bg(canvas, doc):
@@ -675,7 +688,7 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
         canvas.restoreState()
 
     doc = SimpleDocTemplate(buf, pagesize=letter,
-                            topMargin=0.75*inch, bottomMargin=0.75*inch,
+                            topMargin=1.3*inch, bottomMargin=0.5*inch,
                             leftMargin=0.75*inch, rightMargin=0.75*inch)
     styles = getSampleStyleSheet()
     story = []
@@ -707,49 +720,47 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
         return t
 
     # ═══════════════════════════════════════════
-    # PAGE 1: COVER PAGE
+    # PAGE 1: COVER PAGE (white bg, logo, MES title)
     # ═══════════════════════════════════════════
-    story.append(Spacer(1, 1.5*inch))
+    story.append(Spacer(1, 0.65*inch))
 
-    # Main title
-    story.append(Paragraph('HRS EXHAUST SHAFT', ParagraphStyle(
-        'CoverTitle1', parent=styles['Title'],
-        fontSize=32, textColor=WHITE, alignment=TA_CENTER, spaceAfter=0,
-        fontName='Helvetica-Bold')))
+    # Main title — dark navy on white
+    story.append(Paragraph('MES EXHAUST SHAFT', ParagraphStyle(
+        'CoverTitle1', fontSize=34, textColor=NAVY, alignment=TA_CENTER,
+        spaceAfter=4, fontName='Helvetica-Bold', leading=42)))
     story.append(Paragraph('SIZING REPORT', ParagraphStyle(
-        'CoverTitle2', parent=styles['Title'],
-        fontSize=32, textColor=WHITE, alignment=TA_CENTER, spaceAfter=8,
-        fontName='Helvetica-Bold')))
+        'CoverTitle2', fontSize=34, textColor=NAVY, alignment=TA_CENTER,
+        spaceAfter=10, fontName='Helvetica-Bold', leading=42)))
 
     # Subtitle
-    story.append(Paragraph('High-Rise Shaft Constant Pressure System', ParagraphStyle(
-        'CoverSub', parent=styles['Normal'],
-        fontSize=14, textColor=GRAY5, alignment=TA_CENTER, spaceAfter=24)))
+    story.append(Paragraph('Multi-Family Shaft Constant Pressure System', ParagraphStyle(
+        'CoverSub', fontSize=13, textColor=GRAY7, alignment=TA_CENTER,
+        spaceAfter=18, leading=18)))
 
-    # Red divider line (simulated with HRFlowable)
-    story.append(HRFlowable(width="40%", thickness=3, color=RED,
-                             spaceBefore=4, spaceAfter=16, hAlign='CENTER'))
+    # Red divider
+    story.append(HRFlowable(width="25%", thickness=3, color=RED,
+                             spaceBefore=4, spaceAfter=22, hAlign='CENTER'))
 
-    # Project info
+    # Project info — generous spacing
     story.append(Paragraph(f'<b>{project_name}</b>', ParagraphStyle(
-        'CoverProject', parent=styles['Normal'],
-        fontSize=18, textColor=WHITE, alignment=TA_CENTER, spaceAfter=4)))
+        'CoverProject', fontSize=20, textColor=BLACK6, alignment=TA_CENTER,
+        spaceAfter=8, fontName='Helvetica-Bold', leading=26)))
     if project_location:
         story.append(Paragraph(project_location, ParagraphStyle(
-            'CoverLoc', parent=styles['Normal'],
-            fontSize=13, textColor=GRAY5, alignment=TA_CENTER, spaceAfter=4)))
+            'CoverLoc', fontSize=14, textColor=GRAY7, alignment=TA_CENTER,
+            spaceAfter=6, leading=18)))
     story.append(Paragraph(f'{ss.exhaust_type}', ParagraphStyle(
-        'CoverType', parent=styles['Normal'],
-        fontSize=12, textColor=colors.HexColor('#e8e8e8'), alignment=TA_CENTER, spaceAfter=4)))
+        'CoverType', fontSize=12, textColor=GRAY5, alignment=TA_CENTER,
+        spaceAfter=8, leading=16)))
     if operator_email:
         story.append(Paragraph(f'Prepared by: {operator_email}', ParagraphStyle(
-            'CoverEmail', parent=styles['Normal'],
-            fontSize=10, textColor=GRAY7, alignment=TA_CENTER, spaceAfter=2)))
+            'CoverEmail', fontSize=10, textColor=GRAY7, alignment=TA_CENTER,
+            spaceAfter=4, leading=14)))
     story.append(Paragraph(today_str, ParagraphStyle(
-        'CoverDate', parent=styles['Normal'],
-        fontSize=10, textColor=GRAY7, alignment=TA_CENTER, spaceAfter=20)))
+        'CoverDate', fontSize=10, textColor=GRAY7, alignment=TA_CENTER,
+        spaceAfter=26, leading=14)))
 
-    # System At A Glance table (centered, dark style)
+    # System At A Glance table — clean white style with red header
     glance_data = [
         ['SYSTEM AT A GLANCE', ''],
         ['Building Floors', str(ss.floors)],
@@ -768,32 +779,40 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 10),
         ('SPAN', (0, 0), (-1, 0)),
-        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#1e2d45')),
-        ('TEXTCOLOR', (0, 1), (0, -1), GRAY5),
-        ('TEXTCOLOR', (1, 1), (1, -2), WHITE),
-        ('TEXTCOLOR', (1, -1), (1, -1), status_color),
+        ('ALIGN', (0, 0), (-1, 0), 'LEFT'),
+        ('LEFTPADDING', (0, 0), (-1, 0), 10),
+        # Alternating rows
+        ('BACKGROUND', (0, 1), (-1, 1), colors.HexColor('#f5f5f5')),
+        ('BACKGROUND', (0, 2), (-1, 2), WHITE),
+        ('BACKGROUND', (0, 3), (-1, 3), colors.HexColor('#f5f5f5')),
+        ('BACKGROUND', (0, 4), (-1, 4), WHITE),
+        ('BACKGROUND', (0, 5), (-1, 5), colors.HexColor('#f5f5f5')),
+        ('BACKGROUND', (0, 6), (-1, 6), WHITE),
+        ('BACKGROUND', (0, 7), (-1, 7), colors.HexColor('#f5f5f5')),
+        ('TEXTCOLOR', (0, 1), (0, -1), BLACK6),
         ('FONTNAME', (0, 1), (0, -1), 'Helvetica'),
+        ('TEXTCOLOR', (1, 1), (1, -2), BLACK6),
         ('FONTNAME', (1, 1), (1, -1), 'Helvetica-Bold'),
+        ('TEXTCOLOR', (1, -1), (1, -1), status_color),
         ('FONTSIZE', (0, 1), (-1, -1), 10),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#3a5070')),
-        ('TOPPADDING', (0, 0), (-1, -1), 5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-        ('LEFTPADDING', (0, 0), (-1, -1), 10),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('TOPPADDING', (0, 0), (-1, 0), 7),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 7),
+        ('TOPPADDING', (0, 1), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+        ('LEFTPADDING', (0, 1), (-1, -1), 10),
         ('ALIGN', (1, 1), (1, -1), 'RIGHT'),
+        ('RIGHTPADDING', (1, 1), (1, -1), 10),
+        ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#dddddd')),
+        ('LINEBELOW', (0, 0), (-1, 0), 1, RED),
+        ('LINEBELOW', (0, 1), (-1, -2), 0.5, colors.HexColor('#e8e8e8')),
     ]))
     story.append(tg)
 
-    story.append(Spacer(1, 0.6*inch))
+    story.append(Spacer(1, 0.45*inch))
 
     # Footer branding
     story.append(Paragraph('LF Systems by RM Manifold', ParagraphStyle(
-        'CoverBrand', parent=styles['Normal'],
-        fontSize=11, textColor=GRAY5, alignment=TA_CENTER, spaceAfter=2)))
-    story.append(Paragraph('100 S Sylvania Ave, Fort Worth, TX 76111 | 817-393-4029 | lfsystems.net', ParagraphStyle(
-        'CoverAddr', parent=styles['Normal'],
-        fontSize=9, textColor=GRAY7, alignment=TA_CENTER, spaceAfter=0)))
+        'CoverBrand', fontSize=10, textColor=GRAY7, alignment=TA_CENTER)))
 
     story.append(PageBreak())
 
