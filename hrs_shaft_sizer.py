@@ -144,53 +144,133 @@ def size_shaft(params: dict) -> dict:
         k_per = K_ELBOW_90 if offset_angle >= 60 else K_ELBOW_45
         k_offset = offset_elbows * k_per
 
+    # ── CFM contributed per floor (with diversity) ──
+    floor_cfm = []
+    for fd in floor_data:
+        floor_cfm.append(fd["penetrations"] * fd["cfm_per_pen"] * diversity_pct / 100.0)
+
     # ── try a specific shaft size ──
     def evaluate(shaft_area_sqin, dh_in, label, is_round, dim_a, dim_b):
         eff_area = shaft_area_sqin - max_subduct_area_on_any_floor
         if eff_area <= 0:
             return None
         eff_area_sqft = eff_area / 144.0
-        vel = design_cfm / eff_area_sqft  # fpm
 
-        if vel < 50:
+        # ────────────────────────────────────────────────
+        # CUMULATIVE AIRFLOW MODEL — FAN ON ROOF
+        # ────────────────────────────────────────────────
+        # The exhaust fan is on the ROOF pulling air UPWARD.
+        # Floor 1 (bottom) exhausts first — at this point
+        # the shaft below has NO air, so friction is zero.
+        #
+        # As we go UP, each floor adds CFM to the shaft.
+        # The shaft section ABOVE each floor carries the
+        # cumulative CFM of that floor + all floors below.
+        #
+        # Shaft sections (each one floor-height tall):
+        #   Section above Floor 1: carries Floor 1 CFM only
+        #   Section above Floor 2: carries Floor 1+2 CFM
+        #   ...
+        #   Section above Floor N: carries ALL CFM
+        #
+        # PRESSURE AT EACH FLOOR PENETRATION:
+        # The negative pressure the shaft exerts at each
+        # floor's penetration is determined by what is
+        # happening in the shaft AT that floor level.
+        #
+        # At Floor 1 (bottom): No air is in the shaft yet
+        #   below this point. Air just enters. The shaft
+        #   pressure at this level ≈ 0 (only minor entry
+        #   effects). This floor has NO trouble exhausting.
+        #
+        # At Floor N (top): The shaft below is carrying
+        #   cumulative CFM from ALL lower floors. The
+        #   accumulated friction from all those sections
+        #   has reduced the available negative pressure
+        #   at this level. This floor has the MOST
+        #   difficulty exhausting into the shaft.
+        #
+        # The ΔP we care about: the DIFFERENCE in shaft
+        # pressure between Floor 1 (easiest) and Floor N
+        # (hardest). This must be ≤ max_delta_p.
+        # ────────────────────────────────────────────────
+
+        # Build shaft sections bottom-to-top
+        # section[i] = shaft between Floor i+1 and Floor i+2
+        #              (or between Floor i+1 and the fan for the last)
+        # section[i] carries cumulative CFM from floors 1..(i+1)
+        section_dp = []
+        section_cfm = []
+        section_vel = []
+        cumulative = 0.0
+
+        for fi in range(floors):
+            cumulative += floor_cfm[fi]
+            vel_section = cumulative / eff_area_sqft if eff_area_sqft > 0 else 0
+            dp_section = darcy_pressure_drop(floor_height, dh_in, 0, vel_section)
+            section_dp.append(dp_section)
+            section_cfm.append(cumulative)
+            section_vel.append(vel_section)
+
+        # Total shaft friction = sum of all section losses
+        dp_shaft_total = sum(section_dp)
+
+        # Maximum velocity (top section, full design CFM)
+        vel_max = section_vel[-1] if section_vel else 0
+        if vel_max < 50:
             return None
 
-        vp = velocity_pressure(vel)
+        vp_max = velocity_pressure(vel_max)
 
-        # shaft friction (vertical run through building)
-        dp_shaft = darcy_pressure_drop(total_height, dh_in, 0, vel)
+        # After-last-unit duct (carries full design CFM)
+        dp_after = darcy_pressure_drop(duct_after_last, dh_in, 0, vel_max) if duct_after_last > 0 else 0.0
 
-        # duct after last unit
-        dp_after = darcy_pressure_drop(duct_after_last, dh_in, 0, vel) if duct_after_last > 0 else 0.0
+        # Offset section (carries full design CFM, above top floor)
+        dp_offset = darcy_pressure_drop(offset_length, dh_in, k_offset, vel_max) if (offset_elbows > 0) else 0.0
 
-        # offset section
-        dp_offset = darcy_pressure_drop(offset_length, dh_in, k_offset, vel) if (offset_elbows > 0) else 0.0
+        # Fan entry loss (at full velocity)
+        dp_exit = K_EXIT * vp_max
 
-        # entry loss (bellmouth assumed at shaft base)
-        dp_entry = K_ENTRY_BELL * vp
+        # Total system ΔP (what the fan must overcome)
+        dp_total = dp_shaft_total + dp_after + dp_offset + dp_exit
 
-        # exit / fan entry loss
-        dp_exit = K_EXIT * vp
-
-        # total system
-        dp_total = dp_shaft + dp_after + dp_offset + dp_entry + dp_exit
-
-        # ── floor-by-floor balance ──
-        # Bottom floor (floor 1): air must travel full shaft height
-        dp_bottom = dp_shaft + dp_after + dp_offset + dp_exit
-        # Top floor: air only travels ~1 floor height + after-last + offset
-        dp_top_shaft = darcy_pressure_drop(floor_height, dh_in, 0, vel)
-        dp_top = dp_top_shaft + dp_after + dp_offset + dp_exit
-
-        delta_p = abs(dp_bottom - dp_top)
-
-        # per-floor breakdown for detailed report
+        # ────────────────────────────────────────────────
+        # PER-FLOOR PRESSURE (cumulative friction BELOW
+        # each floor — this is how much shaft pressure
+        # has been "used up" by friction by the time we
+        # reach that floor level).
+        #
+        # Floor 1 (bottom): 0 friction below (air just
+        #   entered, nothing above has happened yet from
+        #   this floor's perspective looking into shaft).
+        #
+        # Floor 2: friction of section[0] has accumulated
+        #   (section above Floor 1 carrying Floor 1 CFM).
+        #
+        # Floor N: friction of sections 0..(N-2) has
+        #   accumulated below this point.
+        #
+        # This accumulated friction is what REDUCES the
+        # available negative pressure at each floor.
+        # ────────────────────────────────────────────────
         floor_dp_list = []
+
         for fi in range(floors):
-            floors_above = floors - fi  # floor 1 (bottom) → all floors above
-            h = floors_above * floor_height
-            dp_fl = darcy_pressure_drop(h, dh_in, 0, vel) + dp_after + dp_offset + dp_exit
-            floor_dp_list.append(round(dp_fl, 5))
+            if fi == 0:
+                # Floor 1: no shaft friction has accumulated
+                # below this point — air is just entering
+                accumulated = 0.0
+            else:
+                # Sum of friction in all sections BELOW this
+                # floor (sections 0 through fi-1)
+                accumulated = sum(section_dp[0:fi])
+            floor_dp_list.append(round(accumulated, 5))
+
+        dp_floor1 = floor_dp_list[0]     # Floor 1 (bottom) = 0
+        dp_floorN = floor_dp_list[-1]    # Floor N (top) = max accumulated
+
+        # The ΔP difference the controller must manage
+        delta_p = round(dp_floorN - dp_floor1, 5)
 
         return {
             "label":        label,
@@ -200,23 +280,26 @@ def size_shaft(params: dict) -> dict:
             "shaft_area":   round(shaft_area_sqin, 2),
             "eff_area":     round(eff_area, 2),
             "dh_in":        round(dh_in, 2),
-            "velocity":     round(vel, 0),
-            "vp":           round(vp, 5),
-            "dp_shaft":     round(dp_shaft, 5),
+            "velocity":     round(vel_max, 0),
+            "vp":           round(vp_max, 5),
+            "dp_shaft":     round(dp_shaft_total, 5),
             "dp_after":     round(dp_after, 5),
             "dp_offset":    round(dp_offset, 5),
-            "dp_entry":     round(dp_entry, 5),
+            "dp_entry":     0.0,
             "dp_exit":      round(dp_exit, 5),
             "dp_total":     round(dp_total, 5),
-            "dp_bottom":    round(dp_bottom, 5),
-            "dp_top":       round(dp_top, 5),
-            "delta_p":      round(delta_p, 5),
+            "dp_bottom":    round(dp_floor1, 5),
+            "dp_top":       round(dp_floorN, 5),
+            "delta_p":      delta_p,
             "passes":       delta_p <= max_delta_p,
             "total_cfm":    total_cfm,
             "design_cfm":   round(design_cfm, 0),
             "total_pens":   total_pens,
             "total_height": total_height,
             "floor_dp":     floor_dp_list,
+            "section_cfm":  [round(c, 0) for c in section_cfm],
+            "section_vel":  [round(v, 0) for v in section_vel],
+            "section_dp":   [round(d, 5) for d in section_dp],
         }
 
     # ── run sizing ──
@@ -684,15 +767,15 @@ def render_results():
     with col1:
         st.markdown("#### 🏗️ System Summary")
         summary = {
-            "Exhaust Type":         ss.exhaust_type,
-            "Number of Floors":     ss.floors,
-            "Total Penetrations":   best["total_pens"],
-            "Total CFM (100%)":     f'{best["total_cfm"]:,.0f}',
-            "Diversity Factor":     f'{ss.diversity_pct}%',
-            "Design CFM":           f'{best["design_cfm"]:,.0f}',
-            "Floor-to-Floor Height":f'{ss.floor_height} ft',
-            "Total Shaft Height":   f'{best["total_height"]} ft',
-            "Duct After Last Unit": f'{ss.duct_after_last} ft',
+            "Exhaust Type":             ss.exhaust_type,
+            "Number of Floors":         ss.floors,
+            "Total Penetrations":       best["total_pens"],
+            "Total CFM (all units)":    f'{best["total_cfm"]:,.0f} CFM',
+            "Diversity Factor":         f'{ss.diversity_pct}%',
+            "Design CFM (with diversity)": f'{best["design_cfm"]:,.0f} CFM',
+            "Floor-to-Floor Height":    f'{ss.floor_height} ft',
+            "Total Shaft Height":       f'{best["total_height"]} ft',
+            "Duct After Last Unit":     f'{ss.duct_after_last} ft',
         }
         st.table(pd.DataFrame(summary.items(), columns=["Parameter", "Value"]))
 
@@ -703,8 +786,8 @@ def render_results():
             "Gross Area":           f'{best["shaft_area"]} sq.in.',
             "Net Effective Area":   f'{best["eff_area"]} sq.in.',
             "Hydraulic Diameter":   f'{best["dh_in"]}" ',
-            "Shaft Velocity":       f'{best["velocity"]:,.0f} FPM',
-            "Velocity Pressure":    f'{best["vp"]:.4f} in. WC',
+            "Max Velocity (top)":   f'{best["velocity"]:,.0f} FPM',
+            "Max Velocity Pressure":f'{best["vp"]:.4f} in. WC',
         }
         st.table(pd.DataFrame(shaft_info.items(), columns=["Parameter", "Value"]))
 
@@ -714,29 +797,40 @@ def render_results():
             st.error(f'❌ ΔP = {best["delta_p"]:.4f} in. WC  —  **FAILS**  (> {ss.max_delta_p})')
 
     # ── Pressure Drop Breakdown ──
-    st.markdown("#### 📊 Pressure Drop Breakdown")
+    st.markdown("#### 📊 Pressure Drop Breakdown (Full System at Max CFM)")
     dp_data = {
-        "Component": ["Shaft Friction", "After-Unit Duct", "Offset Losses",
-                       "Entry Loss", "Exit/Fan Loss", "**TOTAL**"],
+        "Component": ["Shaft Friction (cumulative)", "After-Unit Duct", "Offset Losses",
+                       "Exit/Fan Loss", "**TOTAL SYSTEM**"],
         "ΔP (in. WC)": [
             f'{best["dp_shaft"]:.4f}',
             f'{best["dp_after"]:.4f}',
             f'{best["dp_offset"]:.4f}',
-            f'{best["dp_entry"]:.4f}',
             f'{best["dp_exit"]:.4f}',
             f'**{best["dp_total"]:.4f}**',
         ],
     }
     st.table(pd.DataFrame(dp_data))
 
+    st.markdown(
+        f'**Total CFM Requirement:** {best["total_cfm"]:,.0f} CFM &nbsp;→&nbsp; '
+        f'**Design CFM ({ss.diversity_pct}% diversity):** {best["design_cfm"]:,.0f} CFM'
+    )
+
     # ── Floor Balance ──
     st.markdown("#### 🏢 Floor Balance Analysis")
+    st.caption(
+        "Fan is on the roof pulling air upward. At the bottom floor, no exhaust "
+        "air has entered the shaft yet — accumulated friction is 0. As each floor "
+        "adds air on the way up, the shaft velocity and friction increase. "
+        "The top floor sees the most accumulated friction from all the air below it."
+    )
+
     bal_data = {
         "Parameter": [
-            "Bottom Floor ΔP",
-            "Top Floor ΔP",
-            "ΔP Difference (bottom − top)",
-            f"Requirement (≤ {ss.max_delta_p} in. WC)",
+            "Bottom Floor (Floor 1) — Accumulated ΔP",
+            f"Top Floor (Floor {ss.floors}) — Accumulated ΔP",
+            "ΔP Difference (top − bottom)",
+            f"Max Allowable (≤ {ss.max_delta_p} in. WC)",
         ],
         "Value": [
             f'{best["dp_bottom"]:.4f} in. WC',
@@ -749,14 +843,18 @@ def render_results():
 
     # ── Per-Floor Detail (expandable) ──
     if best.get("floor_dp"):
-        with st.expander("📋 Per-Floor Pressure Drop Detail", expanded=False):
+        with st.expander("📋 Per-Floor Pressure & Airflow Detail", expanded=True):
             rows = []
-            for i, dp in enumerate(best["floor_dp"]):
-                rows.append({
+            for i, dp_fl in enumerate(best["floor_dp"]):
+                row = {
                     "Floor": i + 1,
-                    "ΔP to Fan (in. WC)": f"{dp:.4f}",
                     "Position": "Bottom" if i == 0 else ("Top" if i == len(best["floor_dp"])-1 else ""),
-                })
+                    "Cumul. CFM Above": f'{best["section_cfm"][i]:,.0f}' if best.get("section_cfm") else "",
+                    "Shaft Velocity (FPM)": f'{best["section_vel"][i]:,.0f}' if best.get("section_vel") else "",
+                    "Section ΔP (in. WC)": f'{best["section_dp"][i]:.4f}' if best.get("section_dp") else "",
+                    "Accumulated ΔP (in. WC)": f"{dp_fl:.4f}",
+                }
+                rows.append(row)
             st.table(pd.DataFrame(rows))
 
     # ── Alternatives ──
@@ -828,11 +926,16 @@ def render_results():
 | 8" | 54.0 sq.in. |
 
 **Notes:**
+- Fan is on the ROOF pulling exhaust air UP through the shaft
 - Shaft must be straight between floors (no offsets between occupied floors)
 - Offsets are only permitted above the highest floor penetration
+- Airflow is CUMULATIVE: bottom of shaft has minimal air, top has maximum
+- Each inter-floor section carries the cumulative CFM from all floors below it
+- Bottom floor sees the lowest ΔP (least air in shaft above it)
+- Top floor sees the highest ΔP (most cumulative friction to overcome)
 - The HRS system maintains constant negative pressure via EC-Flow Technology™
 - Diversity factor accounts for simultaneous use (typically 20-100%)
-- Maximum allowable ΔP between bottom and top floors: 0.25 in. WC
+- Maximum allowable ΔP between top and bottom floors: 0.25 in. WC
         """)
 
 
