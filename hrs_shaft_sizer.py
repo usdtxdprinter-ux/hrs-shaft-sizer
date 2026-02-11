@@ -1155,14 +1155,14 @@ def process_input(user_input: str):
         if lc in ("yes", "y", "true", "1"):
             st.session_state.same_all = True
             bot("Great — all floors the same.\n\n" + pens_prompt)
-            st.session_state.step = 6
+            st.session_state.step = 5
             st.session_state.awaiting = "pens"
         else:
             st.session_state.same_all = False
             st.session_state.current_floor = 0
             bot(f"OK — per-floor config.\n\n"
                 f"**Floor 1 of {st.session_state.floors}: How many penetrations?** (1 or 2)")
-            st.session_state.step = 6
+            st.session_state.step = 5
             st.session_state.awaiting = "pens"
 
     # ─── Step 5: Floor data (pens → subduct → cfm) ───
@@ -1228,7 +1228,7 @@ def process_input(user_input: str):
                     fd["cfm_per_pen"] = c
                 bot(f"✅ {c} CFM/opening applied to all {st.session_state.floors} floors.\n\n"
                     "**What is the floor-to-floor height (ft)?**")
-                st.session_state.step = 7
+                st.session_state.step = 6
             else:
                 st.session_state.floor_data[st.session_state.current_floor]["cfm_per_pen"] = c
                 cf = st.session_state.current_floor
@@ -1241,9 +1241,9 @@ def process_input(user_input: str):
                 else:
                     bot(f"✅ All {st.session_state.floors} floors configured!\n\n"
                         "**What is the floor-to-floor height (ft)?**")
-                    st.session_state.step = 7
+                    st.session_state.step = 6
 
-    # ─── Step 5: Floor height ───
+    # ─── Step 6: Floor height ───
     elif step == 6:
         user(val)
         try:
@@ -1258,7 +1258,7 @@ def process_input(user_input: str):
             "(Include all horizontal/vertical run after the highest connection.)")
         st.session_state.step = 7
 
-    # ─── Step 6: Duct after last ───
+    # ─── Step 7: Duct after last ───
     elif step == 7:
         user(val)
         try:
@@ -1274,7 +1274,7 @@ def process_input(user_input: str):
             "(e.g., 50 = only 50% of connections active simultaneously)")
         st.session_state.step = 8
 
-    # ─── Step 7: Diversity ───
+    # ─── Step 8: Diversity ───
     elif step == 8:
         user(val)
         try:
@@ -1289,7 +1289,7 @@ def process_input(user_input: str):
             "(The shaft must be straight between floors, but can offset above the top floor.)")
         st.session_state.step = 9
 
-    # ─── Step 8: Offset? ───
+    # ─── Step 9: Offset? ───
     elif step == 9:
         user(val)
         if lc in ("yes", "y", "true", "1"):
@@ -1310,7 +1310,7 @@ def process_input(user_input: str):
                 "- **rect_user** — I'll specify rectangular dims")
             st.session_state.step = 11
 
-    # ─── Step 9: Offset details ───
+    # ─── Step 10: Offset details ───
     elif step == 10:
         user(val)
         aw = st.session_state.awaiting
@@ -1350,7 +1350,7 @@ def process_input(user_input: str):
                 "- **rect_user** — I'll specify rectangular dims")
             st.session_state.step = 11
 
-    # ─── Step 10: Shape choice ───
+    # ─── Step 11: Shape choice ───
     elif step == 11:
         user(val)
         if lc in ("round_auto", "rect_auto", "round_user", "rect_user"):
@@ -1371,7 +1371,7 @@ def process_input(user_input: str):
         else:
             bot("⚠️ Choose: **round_auto**, **rect_auto**, **round_user**, or **rect_user**.")
 
-    # ─── Step 11: User size ───
+    # ─── Step 12: User size ───
     elif step == 12:
         user(val)
         aw = st.session_state.awaiting
@@ -1398,7 +1398,7 @@ def process_input(user_input: str):
             "Max = 0.25 in. WC.  Enter your target:")
         st.session_state.step = 13
 
-    # ─── Step 12: Max ΔP → run calculation ───
+    # ─── Step 13: Max ΔP → run calculation ───
     elif step == 13:
         user(val)
         try:
@@ -1437,7 +1437,7 @@ def process_input(user_input: str):
         else:
             bot("✅ **Calculation complete!** See the results below. ⬇️")
 
-    # ─── Step 13: Post-result ───
+    # ─── Step 14: Post-result ───
     elif step == 14:
         user(val)
         if "restart" in lc or "new" in lc or "reset" in lc:
@@ -1809,9 +1809,9 @@ def main():
         buttons = ["1", "2"]
     elif step == 5 and st.session_state.awaiting == "sub":
         buttons = ["4", "6", "8"]
-    elif step == 10:
+    elif step == 9:
         buttons = ["Yes", "No"]
-    elif step == 12:
+    elif step == 11:
         buttons = ["round_auto", "rect_auto", "round_user", "rect_user"]
     elif step == 14:
         buttons = ["restart"]
