@@ -218,7 +218,12 @@ def generate_fan_system_chart(fan_sel: dict, system_curve: list) -> bytes:
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
 
+    # Brand font
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Roboto', 'DejaVu Sans', 'Arial']
+
     fig, ax = plt.subplots(figsize=(10, 6))
+    fig.patch.set_facecolor('#fafafa')
 
     # Fan curve
     fan_name = fan_sel["model"]
@@ -233,30 +238,31 @@ def generate_fan_system_chart(fan_sel: dict, system_curve: list) -> bytes:
     else:
         label = fan_name
 
-    ax.plot(fan_cfms, fan_sps, 'b-o', linewidth=2, markersize=5, label=f'{label} Fan Curve', zorder=3)
+    ax.plot(fan_cfms, fan_sps, '-o', color='#234699', linewidth=2, markersize=5, label=f'{label} Fan Curve', zorder=3)
 
     # System curve
     sys_cfms = [p[0] for p in system_curve]
     sys_sps = [p[1] for p in system_curve]
-    ax.plot(sys_cfms, sys_sps, 'r-', linewidth=2, label='System Curve', zorder=3)
+    ax.plot(sys_cfms, sys_sps, '-', color='#b11f33', linewidth=2, label='System Curve', zorder=3)
 
     # Operating point
     op_cfm = fan_sel["design_cfm"]
     op_sp = fan_sel["system_sp"]
-    ax.plot(op_cfm, op_sp, 'g*', markersize=18, label=f'Operating Point ({op_cfm:.0f} CFM, {op_sp:.2f}" WC)',
-            zorder=5, markeredgecolor='black', markeredgewidth=0.5)
+    ax.plot(op_cfm, op_sp, '*', color='#2a3853', markersize=18, label=f'Operating Point ({op_cfm:.0f} CFM, {op_sp:.2f}" WC)',
+            zorder=5, markeredgecolor='#101820', markeredgewidth=0.5)
 
-    ax.set_xlabel('Airflow (CFM)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Static Pressure (in. WC)', fontsize=12, fontweight='bold')
-    ax.set_title(f'Fan Curve vs System Curve — {label}', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Airflow (CFM)', fontsize=12, fontweight='bold', color='#2a3853')
+    ax.set_ylabel('Static Pressure (in. WC)', fontsize=12, fontweight='bold', color='#2a3853')
+    ax.set_title(f'Fan Curve vs System Curve — {label}', fontsize=14, fontweight='bold', color='#101820')
     ax.legend(loc='upper right', fontsize=10)
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.2, color='#97999b')
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
+    ax.set_facecolor('#fafafa')
 
     # LF Systems branding
-    ax.text(0.01, 0.01, 'LF Systems — lfsystems.net', transform=ax.transAxes,
-            fontsize=8, color='gray', ha='left', va='bottom')
+    ax.text(0.01, 0.01, 'LF Systems by RM Manifold — lfsystems.net', transform=ax.transAxes,
+            fontsize=8, color='#97999b', ha='left', va='bottom')
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -285,11 +291,11 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
 
     # Custom styles
     title_style = ParagraphStyle('CustomTitle', parent=styles['Title'],
-                                  fontSize=20, spaceAfter=6, textColor=colors.HexColor('#1a1a2e'))
+                                  fontSize=20, spaceAfter=6, textColor=colors.HexColor('#2a3853'))
     subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'],
-                                     fontSize=11, textColor=colors.HexColor('#c72c41'), spaceAfter=12)
+                                     fontSize=11, textColor=colors.HexColor('#b11f33'), spaceAfter=12)
     h2_style = ParagraphStyle('H2', parent=styles['Heading2'],
-                               fontSize=14, textColor=colors.HexColor('#1a1a2e'), spaceBefore=16, spaceAfter=8)
+                               fontSize=14, textColor=colors.HexColor('#2a3853'), spaceBefore=16, spaceAfter=8)
     h3_style = ParagraphStyle('H3', parent=styles['Heading3'],
                                fontSize=12, textColor=colors.HexColor('#333'), spaceBefore=12, spaceAfter=6)
     normal = styles['Normal']
@@ -316,7 +322,7 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
     ]
     t = RLTable(sum_data, colWidths=[3*inch, 4*inch])
     t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2a3853')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 9),
@@ -342,7 +348,7 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
     ]
     t2 = RLTable(shaft_data, colWidths=[3*inch, 4*inch])
     t2.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2a3853')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 9),
@@ -372,7 +378,7 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
     ]
     t3 = RLTable(dp_data, colWidths=[4*inch, 3*inch])
     t3.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2a3853')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
@@ -406,7 +412,7 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
             ])
         t4 = RLTable(fl_data, colWidths=[0.7*inch, 1.3*inch, 1.4*inch, 1.5*inch, 1.5*inch])
         t4.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2a3853')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, -1), 8),
@@ -438,7 +444,7 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
         fan_data.insert(3, ['CFM per Fan', f'{fan_sel["cfm_per_fan"]:,.0f} CFM'])
     t5 = RLTable(fan_data, colWidths=[3*inch, 4*inch])
     t5.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#c72c41')),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#b11f33')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 9),
@@ -463,7 +469,7 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
     ]
     t6 = RLTable(ctrl_data, colWidths=[3*inch, 4*inch])
     t6.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#c72c41')),
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#b11f33')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 9),
@@ -1462,7 +1468,7 @@ def render_results():
 
     st.markdown("---")
     st.markdown(
-        '<h2 style="color:#c72c41; margin-bottom:0;">📐 HRS Exhaust Shaft Sizing Results</h2>',
+        '<h2 style="color:#234699; margin-bottom:0; font-family:Roboto,sans-serif; font-weight:900;">📐 HRS Exhaust Shaft Sizing Results</h2>',
         unsafe_allow_html=True,
     )
     st.caption(f"LF Systems HRS — {ss.exhaust_type}")
@@ -1697,83 +1703,141 @@ def main():
         layout="wide",
     )
 
-    # ── Custom CSS ──
+    # ── Custom CSS — LF Systems Brand (RM Manifold Style Guide) ──
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap');
 
     .stApp {
-        font-family: 'IBM Plex Sans', sans-serif;
+        font-family: 'Roboto', sans-serif;
     }
-    /* Header banner */
+
+    /* Header banner — Dark Navy gradient per brand guide */
     .hrs-header {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        padding: 18px 28px;
-        border-radius: 10px;
+        background: linear-gradient(135deg, #2a3853 0%, #101820 100%);
+        padding: 20px 28px;
+        border-radius: 8px;
         margin-bottom: 20px;
-        border-bottom: 4px solid #c72c41;
+        border-bottom: 4px solid #b11f33;
+        display: flex;
+        align-items: center;
+        gap: 20px;
     }
-    .hrs-header h1 {
+    .hrs-header-logo {
+        flex-shrink: 0;
+    }
+    .hrs-header-logo img {
+        height: 48px;
+        width: auto;
+    }
+    .hrs-header-text h1 {
         color: white;
         margin: 0;
-        font-size: 24px;
-        font-weight: 700;
+        font-size: 22px;
+        font-weight: 900;
+        letter-spacing: -0.3px;
+        font-family: 'Roboto', sans-serif;
     }
-    .hrs-header p {
-        color: rgba(255,255,255,0.7);
+    .hrs-header-text p {
+        color: #c8c9c7;
         margin: 4px 0 0 0;
         font-size: 13px;
+        font-weight: 400;
+    }
+    .hrs-header-text a {
+        color: #c8c9c7;
+        text-decoration: underline;
     }
     .hrs-badge {
         display: inline-block;
-        background: #c72c41;
+        background: #b11f33;
         color: white;
         padding: 4px 12px;
-        border-radius: 6px;
-        font-weight: 800;
+        border-radius: 4px;
+        font-weight: 900;
         font-size: 14px;
         margin-right: 10px;
-        letter-spacing: -0.5px;
+        letter-spacing: 0.5px;
+        font-family: 'Roboto', sans-serif;
     }
-    /* Chat messages */
+
+    /* Chat messages — brand aligned */
     .chat-bot {
-        background: #f7f4f0;
-        border-left: 3px solid #c72c41;
+        background: #f4f5f6;
+        border-left: 3px solid #234699;
         padding: 12px 16px;
-        border-radius: 4px 10px 10px 4px;
+        border-radius: 2px 8px 8px 2px;
         margin: 6px 0;
         font-size: 14px;
         line-height: 1.55;
+        font-family: 'Roboto', sans-serif;
+        color: #101820;
     }
     .chat-user {
-        background: linear-gradient(135deg, #c72c41, #a3213a);
+        background: linear-gradient(135deg, #234699, #2a3853);
         color: white;
         padding: 10px 16px;
-        border-radius: 10px 10px 4px 10px;
+        border-radius: 8px 8px 2px 8px;
         margin: 6px 0 6px auto;
         max-width: 70%;
         text-align: right;
         font-size: 14px;
+        font-family: 'Roboto', sans-serif;
     }
+
     /* Tables */
     table {
         font-size: 13px !important;
+        font-family: 'Roboto', sans-serif !important;
+    }
+
+    /* Streamlit overrides for brand consistency */
+    .stButton > button {
+        font-family: 'Roboto', sans-serif;
+        font-weight: 500;
+        border-radius: 4px;
+    }
+    h1, h2, h3, h4 {
+        font-family: 'Roboto', sans-serif !important;
+    }
+
+    /* Download buttons accent */
+    .stDownloadButton > button {
+        background-color: #234699 !important;
+        color: white !important;
+        border: none !important;
+        font-weight: 500;
+    }
+    .stDownloadButton > button:hover {
+        background-color: #2a3853 !important;
     }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Header ──
-    st.markdown("""
+    # ── Header with LF Systems Logo ──
+    import base64 as _b64
+    _logo_path = os.path.join(os.path.dirname(__file__), "lf_logo.png")
+    _logo_b64 = ""
+    if os.path.exists(_logo_path):
+        with open(_logo_path, "rb") as _lf:
+            _logo_b64 = _b64.b64encode(_lf.read()).decode()
+
+    _logo_html = ""
+    if _logo_b64:
+        _logo_html = f'<div class="hrs-header-logo"><img src="data:image/png;base64,{_logo_b64}" alt="LF Systems"></div>'
+
+    st.markdown(f"""
     <div class="hrs-header">
-        <div>
-            <span class="hrs-badge">HRS</span>
-            <span style="color:white; font-size:20px; font-weight:700;">
+        {_logo_html}
+        <div class="hrs-header-text">
+            <h1>
+                <span class="hrs-badge">HRS</span>
                 Exhaust Shaft Sizing Calculator
-            </span>
+            </h1>
+            <p>High Rise Shaft Constant Pressure System &nbsp;|&nbsp;
+            DEF · DBF · L150/L152 &nbsp;|&nbsp;
+            <a href="https://www.lfsystems.net" target="_blank">lfsystems.net</a></p>
         </div>
-        <p>LF Systems — High Rise Shaft Constant Pressure System &nbsp;|&nbsp;
-        DEF · DBF · L150/L152 &nbsp;|&nbsp;
-        <a href="https://www.lfsystems.net" style="color:#ff8a9e;" target="_blank">lfsystems.net</a></p>
     </div>
     """, unsafe_allow_html=True)
 
