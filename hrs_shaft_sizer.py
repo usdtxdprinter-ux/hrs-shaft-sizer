@@ -272,6 +272,51 @@ def generate_fan_system_chart(fan_sel: dict, system_curve: list) -> bytes:
     return buf.read()
 
 
+# ─────────────────────────────────────────────
+# DATA SHEET PATHS (ZIP archives with JPEG pages)
+# ─────────────────────────────────────────────
+def _resolve_datasheet_path(filename: str) -> str:
+    """Find a data sheet file in common locations."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasheets", filename),
+        os.path.join("/mnt/project", filename),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return ""
+
+DATASHEET_PATHS = {
+    "DEF":  _resolve_datasheet_path("DEF_Data_Sheet_1025_1_1.pdf"),
+    "L150": _resolve_datasheet_path("L150_Data_Sheet_0325_1_1.pdf"),
+    "L152": _resolve_datasheet_path("L152_Data_Sheet_0126_1.pdf"),
+}
+
+
+def extract_datasheet_images(sheet_key: str) -> list:
+    """
+    Extract JPEG page images from a data sheet ZIP archive.
+    Returns a list of (jpeg_bytes, width, height) tuples in page order.
+    """
+    import zipfile as _zf
+    path = DATASHEET_PATHS.get(sheet_key, "")
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        images = []
+        with _zf.ZipFile(path, "r") as z:
+            manifest = json.loads(z.read("manifest.json"))
+            for page_info in sorted(manifest["pages"], key=lambda p: p["page_number"]):
+                img_path = page_info["image"]["path"]
+                dims = page_info["image"]["dimensions"]
+                img_bytes = z.read(img_path)
+                images.append((img_bytes, dims["width"], dims["height"]))
+        return images
+    except Exception:
+        return []
+
+
 def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
     """Generate a professional PDF report using reportlab."""
     from reportlab.lib.pagesizes import letter
@@ -497,6 +542,60 @@ def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
         'Fan data from DEF product data sheet. '
         'This report is for estimation purposes. Final design must be verified by a licensed engineer.',
         small))
+
+    # ── Append Data Sheet Pages ──
+    # Determine which data sheets to include
+    ds_keys = []
+    ds_keys.append("DEF")  # Always include DEF fan data sheet
+    # Include controller data sheet based on selection
+    ctrl_model = ctrl.get("model", "")
+    if "L152" in ctrl_model:
+        ds_keys.append("L152")
+    else:
+        ds_keys.append("L150")
+
+    for ds_key in ds_keys:
+        ds_images = extract_datasheet_images(ds_key)
+        if ds_images:
+            # Divider page for each data sheet
+            story.append(PageBreak())
+            story.append(Spacer(1, 2*inch))
+            ds_titles = {"DEF": "DEF Series — Exhaust Fan Data Sheet",
+                         "L150": "L150 Controller Data Sheet",
+                         "L152": "L152 Controller Data Sheet"}
+            story.append(Paragraph(
+                ds_titles.get(ds_key, f"{ds_key} Data Sheet"),
+                ParagraphStyle('DSTitle', parent=styles['Heading1'],
+                               fontSize=22, textColor=colors.HexColor('#234699'),
+                               alignment=TA_CENTER, spaceAfter=12)))
+            story.append(Paragraph(
+                'The following pages are the official LF Systems product data sheet '
+                'for reference in equipment selection and specification.',
+                ParagraphStyle('DSNote', parent=styles['Normal'],
+                               fontSize=11, textColor=colors.HexColor('#97999b'),
+                               alignment=TA_CENTER, spaceAfter=6)))
+
+            # Add each page as a full-page image
+            for pg_idx, (img_bytes, img_w, img_h) in enumerate(ds_images):
+                story.append(PageBreak())
+                # Write image to temp file for reportlab
+                img_buf = io.BytesIO(img_bytes)
+                # Scale to fit within page margins: letter=8.5x11, margins=0.75" each side
+                # Usable: 8.5-1.5=7.0" wide, 11-1.5=9.5" tall, minus header/footer space
+                usable_w = 6.5 * inch
+                usable_h = 8.8 * inch
+                # Maintain aspect ratio
+                aspect = img_w / img_h
+                if (usable_w / usable_h) > aspect:
+                    # Height-limited
+                    fit_h = usable_h
+                    fit_w = fit_h * aspect
+                else:
+                    # Width-limited
+                    fit_w = usable_w
+                    fit_h = fit_w / aspect
+                img_obj = Image(img_buf, width=fit_w, height=fit_h)
+                story.append(img_obj)
 
     doc.build(story)
     buf.seek(0)
