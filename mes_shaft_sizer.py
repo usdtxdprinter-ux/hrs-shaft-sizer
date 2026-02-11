@@ -1674,7 +1674,7 @@ def step_welcome():
         "**Website:** [lfsystems.net](https://www.lfsystems.net)\n\n"
         "---\n"
         "Let's get started! First, **what is the project name?**\n\n"
-        "*(e.g. \"Parkview Tower\" or \"Sunset Ridge Apartments\")*"
+        "*(e.g. \"Nakatomi Plaza\" or \"Cyberdyne Tower\")*"
     )
     st.session_state.step = 1
 
