@@ -23,6 +23,9 @@ import streamlit as st
 import math
 import pandas as pd
 import json
+import io
+import os
+import tempfile
 
 # ─────────────────────────────────────────────
 # CONSTANTS
@@ -37,12 +40,679 @@ ROUND_SIZES = [8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48]
 RECT_SIDES  = [6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48]
 
 # Fitting loss coefficients (ASHRAE basis)
-K_ELBOW_90      = 0.60   # 90° elbow in shaft offset
-K_ELBOW_45      = 0.30   # 45° elbow
-K_TEE_BRANCH    = 0.50   # tee branch entry from subduct
-K_EXIT          = 1.00   # abrupt exit / fan entry
-K_ENTRY_BELL    = 0.03   # bellmouth entry at bottom of shaft
-K_ENTRY_ABRUPT  = 0.50   # abrupt entry
+K_ELBOW_90      = 0.60
+K_ELBOW_45      = 0.30
+K_TEE_BRANCH    = 0.50
+K_EXIT          = 1.00
+K_ENTRY_BELL    = 0.03
+K_ENTRY_ABRUPT  = 0.50
+
+# ─────────────────────────────────────────────
+# DEF FAN CURVE DATA (from DEF_Fan_Curves.xlsx)
+# Each fan: list of (CFM, SP in.WC) points
+# ─────────────────────────────────────────────
+DEF_FAN_CURVES = {
+    "DEF004": {
+        "cfm_sp": [(540,0),(490,0.25),(430,0.50),(350,0.75),(240,1.00)],
+        "voltage": "120V/1ph", "hp": "1/2", "motor": "EC",
+        "amps": "6.25", "weight": "35 lbs",
+        "inlet": '8"', "impeller": "BI", "rpm": "1950",
+    },
+    "DEF008": {
+        "cfm_sp": [(970,0),(890,0.25),(840,0.50),(780,0.75),(680,1.00),(540,1.25),(440,1.50),(270,1.75)],
+        "voltage": "120V/1ph", "hp": "1/2", "motor": "EC",
+        "amps": "6.25", "weight": "40 lbs",
+        "inlet": '10"', "impeller": "BI", "rpm": "1950",
+    },
+    "DEF015": {
+        "cfm_sp": [(1860,0),(1780,0.25),(1700,0.50),(1610,0.75),(1520,1.00),(1410,1.25),(1280,1.50),(1140,1.75),(990,2.00)],
+        "voltage": "120V/1ph", "hp": "1/2", "motor": "EC",
+        "amps": "6.25", "weight": "55 lbs",
+        "inlet": '12"', "impeller": "BI", "rpm": "1950",
+    },
+    "DEF025": {
+        "cfm_sp": [(2480,0),(2400,0.25),(2320,0.50),(2230,0.75),(2140,1.00),(2040,1.25),(1930,1.50),(1790,1.75),(1630,2.00)],
+        "voltage": "120V/1ph", "hp": "1", "motor": "EC",
+        "amps": "12.9", "weight": "80 lbs",
+        "inlet": '14"', "impeller": "BI", "rpm": "1950",
+    },
+    "DEF035": {
+        "cfm_sp": [(4100,0),(3940,0.25),(3770,0.50),(3610,0.75),(3460,1.00),(3300,1.25),(3120,1.50),(2900,1.75),(2630,2.00)],
+        "voltage": "208/480V/3ph", "hp": "3", "motor": "ID",
+        "amps": "9.8/4.9", "weight": "275 lbs",
+        "inlet": '18"', "impeller": "BC", "rpm": "1740",
+    },
+    "DEF050": {
+        "cfm_sp": [(5850,0),(5660,0.25),(5450,0.50),(5300,0.75),(5090,1.00),(4890,1.25),(4680,1.50),(4460,1.75),(4230,2.00)],
+        "voltage": "208/480V/3ph", "hp": "5", "motor": "ID",
+        "amps": "12.6/6.4", "weight": "380 lbs",
+        "inlet": '20"', "impeller": "BC", "rpm": "1740",
+    },
+}
+
+FAN_ORDER = ["DEF004", "DEF008", "DEF015", "DEF025", "DEF035", "DEF050"]
+
+
+def fan_max_cfm_at_sp(fan_name: str, sp: float) -> float:
+    """Interpolate fan curve to find CFM at a given static pressure."""
+    pts = DEF_FAN_CURVES[fan_name]["cfm_sp"]
+    # pts are (cfm, sp) pairs with SP ascending, CFM descending
+    sps = [p[1] for p in pts]
+    cfms = [p[0] for p in pts]
+    if sp <= sps[0]:
+        return cfms[0]
+    if sp >= sps[-1]:
+        return cfms[-1]
+    for i in range(len(sps) - 1):
+        if sps[i] <= sp <= sps[i + 1]:
+            frac = (sp - sps[i]) / (sps[i + 1] - sps[i])
+            return cfms[i] + frac * (cfms[i + 1] - cfms[i])
+    return cfms[-1]
+
+
+def fan_sp_at_cfm(fan_name: str, cfm: float) -> float:
+    """Interpolate fan curve to find SP at a given CFM (inverse lookup)."""
+    pts = DEF_FAN_CURVES[fan_name]["cfm_sp"]
+    cfms = [p[0] for p in pts]  # descending
+    sps = [p[1] for p in pts]   # ascending
+    if cfm >= cfms[0]:
+        return sps[0]
+    if cfm <= cfms[-1]:
+        return sps[-1]
+    for i in range(len(cfms) - 1):
+        if cfms[i] >= cfm >= cfms[i + 1]:
+            frac = (cfms[i] - cfm) / (cfms[i] - cfms[i + 1])
+            return sps[i] + frac * (sps[i + 1] - sps[i])
+    return sps[-1]
+
+
+def select_fan(design_cfm: float, system_sp: float) -> dict:
+    """
+    Select the best DEF fan for the application.
+    If a single DEF050 isn't enough, recommend multiple DEF050s in parallel.
+    Returns dict with fan selection details.
+    """
+    # Try each fan in order (smallest to largest)
+    for name in FAN_ORDER:
+        available_cfm = fan_max_cfm_at_sp(name, system_sp)
+        if available_cfm >= design_cfm:
+            # This fan can handle it
+            op_sp = fan_sp_at_cfm(name, design_cfm)
+            return {
+                "model": name,
+                "quantity": 1,
+                "parallel": False,
+                "design_cfm": design_cfm,
+                "system_sp": round(system_sp, 4),
+                "available_cfm": round(available_cfm, 0),
+                "operating_sp": round(op_sp, 4),
+                "margin_pct": round((available_cfm - design_cfm) / design_cfm * 100, 1),
+                "specs": DEF_FAN_CURVES[name],
+            }
+
+    # If no single fan works, use multiple DEF050s in parallel
+    # In parallel, each fan handles design_cfm / N at the same SP
+    def050_max = fan_max_cfm_at_sp("DEF050", system_sp)
+    num_fans = math.ceil(design_cfm / def050_max)
+    cfm_per_fan = design_cfm / num_fans
+    op_sp = fan_sp_at_cfm("DEF050", cfm_per_fan)
+
+    return {
+        "model": "DEF050",
+        "quantity": num_fans,
+        "parallel": True,
+        "design_cfm": design_cfm,
+        "cfm_per_fan": round(cfm_per_fan, 0),
+        "system_sp": round(system_sp, 4),
+        "available_cfm": round(def050_max * num_fans, 0),
+        "operating_sp": round(op_sp, 4),
+        "margin_pct": round((def050_max * num_fans - design_cfm) / design_cfm * 100, 1),
+        "specs": DEF_FAN_CURVES["DEF050"],
+    }
+
+
+def select_controller(floors: int) -> dict:
+    """Select L150-H for ≤7 stories, L152-M for >7 stories."""
+    if floors <= 7:
+        return {
+            "model": "L150.H",
+            "name": "L150 Constant Pressure Controller",
+            "system": "HRS (High-Rise System)",
+            "accessories": "LP5, SLT, DP",
+            "reason": f"{floors} stories (≤7 → L150-H)",
+            "listings": "UL508, CSA C22.2 No 14-18",
+        }
+    else:
+        return {
+            "model": "L152.M",
+            "name": "L152 Constant Pressure Controller",
+            "system": "MES (Multi-Story Exhaust System)",
+            "accessories": "(2) LP5, (2) SLT, (2) DP",
+            "reason": f"{floors} stories (>7 → L152 for stack effect mitigation)",
+            "listings": "UL508, UL864, CSA C22.2 No 14-18",
+        }
+
+
+def compute_system_curve(params: dict, best: dict, n_points: int = 20) -> list:
+    """
+    Compute system curve: ΔP vs CFM from 0 to 120% of design CFM.
+    System ΔP ∝ CFM² (approximately, for turbulent flow).
+    Returns list of (cfm, sp) tuples.
+    """
+    design_cfm = best["design_cfm"]
+    system_sp = best["dp_total"]
+    points = []
+    for i in range(n_points + 1):
+        frac = i / n_points * 1.2  # 0 to 120%
+        cfm = design_cfm * frac
+        # System resistance follows square law: SP = k * CFM²
+        sp = system_sp * (frac ** 2) if frac > 0 else 0
+        points.append((round(cfm, 0), round(sp, 4)))
+    return points
+
+
+def generate_fan_system_chart(fan_sel: dict, system_curve: list) -> bytes:
+    """Generate fan curve + system curve chart as PNG bytes using matplotlib."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Fan curve
+    fan_name = fan_sel["model"]
+    pts = DEF_FAN_CURVES[fan_name]["cfm_sp"]
+    fan_cfms = [p[0] for p in pts]
+    fan_sps = [p[1] for p in pts]
+
+    if fan_sel["parallel"] and fan_sel["quantity"] > 1:
+        # For parallel fans, multiply CFM by quantity
+        fan_cfms = [c * fan_sel["quantity"] for c in fan_cfms]
+        label = f'{fan_sel["quantity"]}x {fan_name} (parallel)'
+    else:
+        label = fan_name
+
+    ax.plot(fan_cfms, fan_sps, 'b-o', linewidth=2, markersize=5, label=f'{label} Fan Curve', zorder=3)
+
+    # System curve
+    sys_cfms = [p[0] for p in system_curve]
+    sys_sps = [p[1] for p in system_curve]
+    ax.plot(sys_cfms, sys_sps, 'r-', linewidth=2, label='System Curve', zorder=3)
+
+    # Operating point
+    op_cfm = fan_sel["design_cfm"]
+    op_sp = fan_sel["system_sp"]
+    ax.plot(op_cfm, op_sp, 'g*', markersize=18, label=f'Operating Point ({op_cfm:.0f} CFM, {op_sp:.2f}" WC)',
+            zorder=5, markeredgecolor='black', markeredgewidth=0.5)
+
+    ax.set_xlabel('Airflow (CFM)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Static Pressure (in. WC)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Fan Curve vs System Curve — {label}', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    # LF Systems branding
+    ax.text(0.01, 0.01, 'LF Systems — lfsystems.net', transform=ax.transAxes,
+            fontsize=8, color='gray', ha='left', va='bottom')
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+def generate_pdf_report(ss, best, fan_sel, ctrl, chart_png_bytes) -> bytes:
+    """Generate a professional PDF report using reportlab."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                     Table as RLTable, TableStyle, Image, PageBreak)
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter,
+                            topMargin=0.75*inch, bottomMargin=0.75*inch,
+                            leftMargin=0.75*inch, rightMargin=0.75*inch)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Custom styles
+    title_style = ParagraphStyle('CustomTitle', parent=styles['Title'],
+                                  fontSize=20, spaceAfter=6, textColor=colors.HexColor('#1a1a2e'))
+    subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'],
+                                     fontSize=11, textColor=colors.HexColor('#c72c41'), spaceAfter=12)
+    h2_style = ParagraphStyle('H2', parent=styles['Heading2'],
+                               fontSize=14, textColor=colors.HexColor('#1a1a2e'), spaceBefore=16, spaceAfter=8)
+    h3_style = ParagraphStyle('H3', parent=styles['Heading3'],
+                               fontSize=12, textColor=colors.HexColor('#333'), spaceBefore=12, spaceAfter=6)
+    normal = styles['Normal']
+    small = ParagraphStyle('Small', parent=normal, fontSize=8, textColor=colors.gray)
+
+    # ── Title ──
+    story.append(Paragraph('HRS Exhaust Shaft Sizing Report', title_style))
+    story.append(Paragraph(f'LF Systems — {ss.exhaust_type} | lfsystems.net', subtitle_style))
+    story.append(Spacer(1, 12))
+
+    # ── System Summary Table ──
+    story.append(Paragraph('System Summary', h2_style))
+    sum_data = [
+        ['Parameter', 'Value'],
+        ['Exhaust Type', ss.exhaust_type],
+        ['Number of Floors', str(ss.floors)],
+        ['Total Penetrations', str(best['total_pens'])],
+        ['Total CFM (all units)', f'{best["total_cfm"]:,.0f} CFM'],
+        ['Diversity Factor', f'{ss.diversity_pct}%'],
+        ['Design CFM', f'{best["design_cfm"]:,.0f} CFM'],
+        ['Floor-to-Floor Height', f'{ss.floor_height} ft'],
+        ['Total Shaft Height', f'{best["total_height"]} ft'],
+        ['Duct After Last Unit', f'{ss.duct_after_last} ft'],
+    ]
+    t = RLTable(sum_data, colWidths=[3*inch, 4*inch])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 12))
+
+    # ── Recommended Shaft Size ──
+    story.append(Paragraph('Recommended Shaft Size', h2_style))
+    shaft_data = [
+        ['Parameter', 'Value'],
+        ['Shaft Size', best['label']],
+        ['Gross Area', f'{best["shaft_area"]} sq.in.'],
+        ['Net Effective Area', f'{best["eff_area"]} sq.in.'],
+        ['Hydraulic Diameter', f'{best["dh_in"]}"'],
+        ['Max Velocity (top)', f'{best["velocity"]:,.0f} FPM'],
+        ['Velocity Pressure', f'{best["vp"]:.4f} in. WC'],
+    ]
+    t2 = RLTable(shaft_data, colWidths=[3*inch, 4*inch])
+    t2.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t2)
+    story.append(Spacer(1, 6))
+
+    status = 'PASS' if best['passes'] else 'FAIL'
+    story.append(Paragraph(
+        f'Floor Balance: {best["delta_p"]:.4f} in. WC differential — <b>{status}</b> '
+        f'(max {ss.max_delta_p} in. WC)', normal))
+    story.append(Spacer(1, 12))
+
+    # ── Pressure Drop Breakdown ──
+    story.append(Paragraph('Pressure Drop Breakdown', h2_style))
+    dp_data = [
+        ['Component', 'in. WC'],
+        ['Shaft Friction (cumulative)', f'{best["dp_shaft"]:.4f}'],
+        ['After-Unit Duct', f'{best["dp_after"]:.4f}'],
+        ['Offset Losses', f'{best["dp_offset"]:.4f}'],
+        ['Exit/Fan Loss', f'{best["dp_exit"]:.4f}'],
+        ['TOTAL SYSTEM', f'{best["dp_total"]:.4f}'],
+    ]
+    t3 = RLTable(dp_data, colWidths=[4*inch, 3*inch])
+    t3.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t3)
+    story.append(Spacer(1, 12))
+
+    # ── Floor Balance ──
+    story.append(Paragraph('Floor Balance Analysis', h2_style))
+    story.append(Paragraph(
+        'Bottom floor (Floor 1): 0.0000 in. WC — no air in shaft yet. '
+        f'Top floor (Floor {ss.floors}): {best["dp_top"]:.4f} in. WC — '
+        f'maximum accumulated friction. Differential: {best["delta_p"]:.4f} in. WC.', normal))
+    story.append(Spacer(1, 8))
+
+    # Per-floor table
+    if best.get("floor_dp") and len(best["floor_dp"]) <= 30:
+        fl_data = [['Floor', 'Cumul. CFM', 'Velocity (FPM)', 'Section dP', 'Accumulated dP']]
+        for i in range(len(best["floor_dp"])):
+            fl_data.append([
+                str(i + 1),
+                f'{best["section_cfm"][i]:,.0f}',
+                f'{best["section_vel"][i]:,.0f}',
+                f'{best["section_dp"][i]:.4f}',
+                f'{best["floor_dp"][i]:.4f}',
+            ])
+        t4 = RLTable(fl_data, colWidths=[0.7*inch, 1.3*inch, 1.4*inch, 1.5*inch, 1.5*inch])
+        t4.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a2e')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+        story.append(t4)
+
+    story.append(PageBreak())
+
+    # ── Fan Selection ──
+    story.append(Paragraph('Fan Selection', h2_style))
+    qty_label = f'{fan_sel["quantity"]}x ' if fan_sel["quantity"] > 1 else ''
+    fan_data = [
+        ['Parameter', 'Value'],
+        ['Selected Fan', f'{qty_label}{fan_sel["model"]}'],
+        ['Design CFM', f'{fan_sel["design_cfm"]:,.0f} CFM'],
+        ['System Static Pressure', f'{fan_sel["system_sp"]:.4f} in. WC'],
+        ['Available CFM at SP', f'{fan_sel["available_cfm"]:,.0f} CFM'],
+        ['Capacity Margin', f'{fan_sel["margin_pct"]}%'],
+        ['Voltage', fan_sel['specs']['voltage']],
+        ['HP', fan_sel['specs']['hp']],
+        ['Motor Type', fan_sel['specs']['motor']],
+        ['Impeller', fan_sel['specs']['impeller']],
+    ]
+    if fan_sel["parallel"]:
+        fan_data.insert(3, ['CFM per Fan', f'{fan_sel["cfm_per_fan"]:,.0f} CFM'])
+    t5 = RLTable(fan_data, colWidths=[3*inch, 4*inch])
+    t5.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#c72c41')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t5)
+    story.append(Spacer(1, 12))
+
+    # ── Controller Selection ──
+    story.append(Paragraph('Controller Selection', h2_style))
+    ctrl_data = [
+        ['Parameter', 'Value'],
+        ['Controller', ctrl['model']],
+        ['Description', ctrl['name']],
+        ['System', ctrl['system']],
+        ['Accessories', ctrl['accessories']],
+        ['Selection Basis', ctrl['reason']],
+        ['Listings', ctrl['listings']],
+    ]
+    t6 = RLTable(ctrl_data, colWidths=[3*inch, 4*inch])
+    t6.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#c72c41')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t6)
+    story.append(Spacer(1, 12))
+
+    # ── Fan/System Curve Chart ──
+    story.append(Paragraph('Fan Curve vs System Curve', h2_style))
+    if chart_png_bytes:
+        img_buf = io.BytesIO(chart_png_bytes)
+        img = Image(img_buf, width=6.5*inch, height=3.9*inch)
+        story.append(img)
+
+    story.append(Spacer(1, 16))
+    story.append(Paragraph(
+        'LF Systems | 100 S Sylvania Ave, Fort Worth, TX 76111 | 817-393-4029 | lfsystems.net',
+        small))
+    story.append(Paragraph(
+        'Engineering calculations per ASHRAE 2009 Duct Design Chapter 21. '
+        'Fan data from DEF product data sheet. '
+        'This report is for estimation purposes. Final design must be verified by a licensed engineer.',
+        small))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
+def generate_csi_spec(ss, best, fan_sel, ctrl) -> bytes:
+    """Generate CSI Section 23 34 00 specification as a .docx file."""
+    from docx import Document
+    from docx.shared import Inches, Pt, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.style import WD_STYLE_TYPE
+
+    doc = Document()
+
+    # Set default font
+    style = doc.styles['Normal']
+    font = style.font
+    font.name = 'Arial'
+    font.size = Pt(10)
+
+    # Helper
+    def add_heading_text(text, level=1):
+        h = doc.add_heading(text, level=level)
+        for run in h.runs:
+            run.font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
+        return h
+
+    def add_part(part_num, title):
+        doc.add_paragraph('')
+        p = doc.add_paragraph()
+        run = p.add_run(f'PART {part_num} — {title}')
+        run.bold = True
+        run.font.size = Pt(12)
+        run.font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
+
+    def add_article(num, title):
+        p = doc.add_paragraph()
+        run = p.add_run(f'{num}  {title}')
+        run.bold = True
+        run.font.size = Pt(10)
+
+    def add_item(text, indent=0):
+        p = doc.add_paragraph(text, style='List Bullet')
+        pf = p.paragraph_format
+        pf.left_indent = Inches(0.5 + indent * 0.25)
+        pf.space_after = Pt(2)
+        return p
+
+    def add_para(text):
+        p = doc.add_paragraph(text)
+        p.paragraph_format.space_after = Pt(4)
+        return p
+
+    # ── Header ──
+    add_heading_text('SECTION 23 34 00', level=1)
+    add_heading_text('HVAC FANS — HIGH-RISE EXHAUST SHAFT SYSTEM', level=2)
+
+    # Fan model info
+    qty_label = f'{fan_sel["quantity"]}x ' if fan_sel["quantity"] > 1 else ''
+    fan_model = fan_sel["model"]
+
+    # ── PART 1 — GENERAL ──
+    add_part(1, 'GENERAL')
+
+    add_article('1.01', 'SECTION INCLUDES')
+    add_item(f'High-rise exhaust shaft system for {ss.exhaust_type.lower()} serving {ss.floors} floors')
+    add_item(f'Variable speed exhaust fan(s): {qty_label}{fan_model}')
+    add_item(f'Constant pressure controller: {ctrl["model"]}')
+    add_item('Associated sensors, accessories, and wiring')
+    add_item('Fire-rated exhaust shaft construction per local building code')
+
+    add_article('1.02', 'REFERENCES')
+    add_item('ASHRAE Handbook — HVAC Systems and Equipment')
+    add_item('ASHRAE Handbook — Fundamentals, Chapter 21: Duct Design')
+    add_item('NFPA 90A — Standard for the Installation of Air-Conditioning and Ventilating Systems')
+    add_item('NFPA 90B — Standard for the Installation of Warm Air Heating and Air-Conditioning Systems')
+    add_item('UL 705 — Standard for Safety Power Ventilators')
+    add_item('UL 508 — Standard for Industrial Control Equipment')
+    add_item('UL 864 — Standard for Control Units and Accessories for Fire Alarm Systems')
+    add_item('IMC — International Mechanical Code, current edition')
+    add_item('SMACNA — HVAC Duct Construction Standards')
+
+    add_article('1.03', 'SUBMITTALS')
+    add_item('Product data sheets for exhaust fan(s) and controller(s)')
+    add_item('Fan performance curves showing operating point')
+    add_item('System pressure drop calculations')
+    add_item('Wiring diagrams')
+    add_item('Installation and maintenance manuals')
+    add_item('Warranty documentation')
+
+    add_article('1.04', 'QUALITY ASSURANCE')
+    add_item('Exhaust fan(s) shall be ETL listed to UL 705')
+    add_item('Controller shall be UL 508 listed for industrial control equipment')
+    if ctrl['model'].startswith('L152'):
+        add_item('Controller shall be UL 864 listed for fire alarm system integration')
+    add_item('Fan manufacturer shall provide a minimum 2-year mechanical warranty')
+    add_item('System shall be designed and tested by the manufacturer')
+
+    add_article('1.05', 'DELIVERY, STORAGE, AND HANDLING')
+    add_item('Deliver products in factory-sealed packaging')
+    add_item('Store in clean, dry, ventilated area protected from weather')
+    add_item('Handle equipment carefully to prevent damage to impellers and motors')
+
+    add_article('1.06', 'WARRANTY')
+    add_item('Manufacturer shall provide a minimum 2-year warranty on all mechanical components')
+    add_item('Controller shall carry a minimum 2-year warranty')
+
+    # ── PART 2 — PRODUCTS ──
+    add_part(2, 'PRODUCTS')
+
+    add_article('2.01', 'MANUFACTURERS')
+    add_item('LF Systems, Fort Worth, TX — www.lfsystems.net')
+    add_item('No substitutions without prior written approval')
+
+    add_article('2.02', f'EXHAUST FAN — {fan_model}')
+    add_item(f'Model: {qty_label}{fan_model} Dynamic Exhaust Fan')
+    add_item(f'Capacity: {best["design_cfm"]:,.0f} CFM at {best["dp_total"]:.2f} in. WC static pressure')
+    add_item(f'Motor: {fan_sel["specs"]["hp"]} HP, {fan_sel["specs"]["voltage"]}, '
+             f'{fan_sel["specs"]["motor"]} type, {fan_sel["specs"]["rpm"]} RPM')
+    add_item(f'Impeller: {fan_sel["specs"]["impeller"]} — backward inclined (BI) or backward curved (BC), '
+             f'5052 aluminum, dynamically balanced')
+    add_item('Housing: G90 galvanized steel with integrated clean-out access panel')
+    add_item('Construction: AMCA 99-0401 Type B Spark Resistant')
+    add_item('Listings: ETL listed to UL 705; CSA C22.2')
+    add_item('Suitable for indoor or outdoor installation')
+    if fan_sel["parallel"]:
+        add_item(f'Provide {fan_sel["quantity"]} fans piped in parallel, each rated for '
+                 f'{fan_sel["cfm_per_fan"]:,.0f} CFM')
+
+    add_article('2.03', f'CONTROLLER — {ctrl["model"]}')
+    add_item(f'Model: {ctrl["model"]} — {ctrl["name"]}')
+    add_item(f'System: {ctrl["system"]}')
+    add_item('Function: Maintain constant negative pressure in exhaust shaft using EC-Flow Technology')
+    add_item('Input: 24V AC/DC')
+    add_item('Output: 0-10 VDC control signal to fan VFD or EC motor')
+    add_item('Display: LCD with 4-button interface')
+    add_item('Communication: Modbus RTU RS485')
+    add_item(f'Listings: {ctrl["listings"]}')
+    add_item(f'Accessories: {ctrl["accessories"]}')
+    if ctrl['model'].startswith('L152'):
+        add_item('Two pressure transducers installed above and below the neutral pressure plane '
+                 'to mitigate seasonal stack effect and reverse stack effect')
+        add_item('Dedicated input for smoke control system integration')
+
+    add_article('2.04', 'ACCESSORIES')
+    add_item('LP5 — Bi-directional pressure transducer')
+    add_item('SLT — Silicone tubing')
+    add_item('DP — Duct probe(s)')
+    if 'VFD' in fan_sel["specs"].get("motor", "") or fan_sel["specs"]["motor"] == "ID":
+        add_item('CFW500 Variable Frequency Drive — NEMA 4X, pre-programmed for DEF motor')
+
+    add_article('2.05', 'EXHAUST SHAFT CONSTRUCTION')
+    add_item(f'Shaft size: {best["label"]}')
+    add_item(f'Gross cross-sectional area: {best["shaft_area"]} sq.in.')
+    if ss.has_subducts:
+        add_item(f'Net effective area (after subduct deductions): {best["eff_area"]} sq.in.')
+    else:
+        add_item(f'Net effective area: {best["eff_area"]} sq.in. (no subducts — full area)')
+    add_item('Construction: Fire-rated shaft per local building code and NFPA requirements')
+    add_item('Material: Galvanized steel ductwork, minimum 26 gauge, per SMACNA standards')
+    if ss.has_subducts:
+        add_item(f'Subduct penetrations: {ss.floor_data[0]["subduct_size"]}" diameter, '
+                 f'{ss.floor_data[0]["penetrations"]} per floor')
+    else:
+        add_item(f'Wall openings: {ss.floor_data[0]["penetrations"]} per floor (no subducts in shaft)')
+    add_item('Shaft shall be straight and vertical between all occupied floors')
+    if ss.has_offset:
+        add_item(f'Offset permitted above top floor: {ss.offset_elbows} elbow(s), '
+                 f'{ss.offset_length} ft length')
+
+    # ── PART 3 — EXECUTION ──
+    add_part(3, 'EXECUTION')
+
+    add_article('3.01', 'INSTALLATION')
+    add_item('Install exhaust fan on roof or mechanical penthouse per manufacturer instructions')
+    add_item('Mount fan on vibration isolators to prevent structure-borne noise')
+    add_item('Install controller in accessible location per manufacturer instructions')
+    add_item('Install pressure transducer(s) and duct probe(s) per manufacturer instructions')
+    if ctrl['model'].startswith('L152'):
+        add_item('Install upper pressure transducer above the neutral pressure plane of the building')
+        add_item('Install lower pressure transducer below the neutral pressure plane of the building')
+    add_item('Connect all wiring per manufacturer wiring diagrams and NEC requirements')
+    add_item('Provide disconnect switch and overcurrent protection per NEC')
+
+    add_article('3.02', 'SHAFT INSTALLATION')
+    add_item('Install exhaust shaft vertically through fire-rated shaft enclosure')
+    add_item('Seal all shaft penetrations with fire-rated materials per building code')
+    if ss.has_subducts:
+        add_item('Install subduct connections at each floor with fire/smoke dampers as required')
+    else:
+        add_item('Install wall openings at each floor with fire/smoke dampers as required')
+    add_item('Ensure shaft is airtight — seal all joints with approved duct sealant')
+
+    add_article('3.03', 'TESTING AND COMMISSIONING')
+    add_item('Verify shaft is airtight before system startup')
+    add_item('Set controller pressure setpoint per design requirements')
+    add_item(f'Verify system maintains negative pressure in shaft at all floor levels')
+    add_item(f'Verify differential pressure between bottom and top floors does not exceed '
+             f'{ss.max_delta_p} in. WC')
+    add_item(f'Verify total system airflow: {best["design_cfm"]:,.0f} CFM')
+    add_item('Document all test results and provide to owner')
+    add_item('Provide training to building maintenance staff on system operation')
+
+    add_article('3.04', 'DESIGN DATA')
+    add_para(f'Total CFM (all units): {best["total_cfm"]:,.0f} CFM')
+    add_para(f'Design CFM ({ss.diversity_pct}% diversity): {best["design_cfm"]:,.0f} CFM')
+    add_para(f'System static pressure: {best["dp_total"]:.4f} in. WC')
+    add_para(f'Floor-to-floor height: {ss.floor_height} ft')
+    add_para(f'Total shaft height: {best["total_height"]} ft')
+    add_para(f'Maximum floor differential: {best["delta_p"]:.4f} in. WC')
+
+    doc.add_paragraph('')
+    p = doc.add_paragraph('END OF SECTION 23 34 00')
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in p.runs:
+        run.bold = True
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 # ─────────────────────────────────────────────
 # ENGINEERING FUNCTIONS
@@ -131,7 +801,7 @@ def size_shaft(params: dict) -> dict:
         sub_size = fd["subduct_size"]
         total_pens += pens
         total_cfm += pens * cfm_each
-        sub_area = pens * SUBDUCT_AREA[sub_size]
+        sub_area = pens * SUBDUCT_AREA.get(sub_size, 0)  # 0 if no subducts
         if sub_area > max_subduct_area_on_any_floor:
             max_subduct_area_on_any_floor = sub_area
 
@@ -365,6 +1035,7 @@ def init_state():
         "duct_after_last":  0.0,
         "diversity_pct":    100.0,
         "has_offset":       False,
+        "has_subducts":     True,
         "offset_elbows":    0,
         "offset_length":    0.0,
         "offset_angle":     90,
@@ -435,11 +1106,30 @@ def process_input(user_input: str):
             bot("⚠️ Please select **Dryers**, **Bathrooms**, or **Kitchen Hoods**.")
             return
         bot(f"✅ **{st.session_state.exhaust_type}** selected.\n\n"
-            f"**How many floors have penetrations into this shaft?**")
+            "**Does this shaft have subducts (branch ducts penetrating the shaft wall)?**\n\n"
+            "Select **Yes** if individual branch ducts from each unit connect into the shaft "
+            "(common for dryer and bath exhaust). "
+            "Select **No** if the shaft has straight wall openings with no subducts inside the shaft.")
         st.session_state.step = 2
 
-    # ─── Step 2: Number of floors ───
+    # ─── Step 2: Subducts yes/no ───
     elif step == 2:
+        user(val)
+        if lc in ("yes", "y", "true", "1"):
+            st.session_state.has_subducts = True
+            bot("✅ **Subducts** — shaft area will be reduced by subduct cross-sections.\n\n"
+                "**How many floors have penetrations into this shaft?**")
+        elif lc in ("no", "n", "false", "0"):
+            st.session_state.has_subducts = False
+            bot("✅ **No subducts** — full shaft area available for airflow.\n\n"
+                "**How many floors have openings into this shaft?**")
+        else:
+            bot("⚠️ Please answer **Yes** or **No**.")
+            return
+        st.session_state.step = 3
+
+    # ─── Step 3: Number of floors ───
+    elif step == 3:
         user(val)
         try:
             n = int(val)
@@ -449,31 +1139,34 @@ def process_input(user_input: str):
             return
         st.session_state.floors = n
         st.session_state.floor_data = [
-            {"penetrations": 1, "subduct_size": 4, "cfm_per_pen": 0} for _ in range(n)
+            {"penetrations": 1, "subduct_size": 0, "cfm_per_pen": 0} for _ in range(n)
         ]
-        bot(f"✅ **{n} floors**.\n\n"
-            "Are **all floors configured the same?** (same # of penetrations, subduct size, CFM)")
-        st.session_state.step = 3
+        same_prompt = "Are **all floors configured the same?** (same # of openings, "
+        if st.session_state.has_subducts:
+            same_prompt += "subduct size, "
+        same_prompt += "CFM)"
+        bot(f"✅ **{n} floors**.\n\n" + same_prompt)
+        st.session_state.step = 4
 
-    # ─── Step 3: Same for all? ───
-    elif step == 3:
+    # ─── Step 4: Same for all? ───
+    elif step == 4:
         user(val)
+        pens_prompt = "**How many penetrations (openings) per floor?** (1 or 2)"
         if lc in ("yes", "y", "true", "1"):
             st.session_state.same_all = True
-            bot("Great — all floors the same.\n\n"
-                "**How many penetrations per floor?** (1 or 2)")
-            st.session_state.step = 4
+            bot("Great — all floors the same.\n\n" + pens_prompt)
+            st.session_state.step = 6
             st.session_state.awaiting = "pens"
         else:
             st.session_state.same_all = False
             st.session_state.current_floor = 0
             bot(f"OK — per-floor config.\n\n"
                 f"**Floor 1 of {st.session_state.floors}: How many penetrations?** (1 or 2)")
-            st.session_state.step = 4
+            st.session_state.step = 6
             st.session_state.awaiting = "pens"
 
-    # ─── Step 4: Floor data (pens → subduct → cfm) ───
-    elif step == 4:
+    # ─── Step 5: Floor data (pens → subduct → cfm) ───
+    elif step == 5:
         user(val)
         aw = st.session_state.awaiting
 
@@ -489,11 +1182,23 @@ def process_input(user_input: str):
                     fd["penetrations"] = n
             else:
                 st.session_state.floor_data[st.session_state.current_floor]["penetrations"] = n
-            bot(f"✅ {n} penetration(s).\n\n"
-                "**What subduct size?** (4, 6, or 8 inches)\n\n"
-                "| Size | Area Removed |\n|---|---|\n"
-                '| 4" | 15.0 sq.in. |\n| 6" | 31.5 sq.in. |\n| 8" | 54.0 sq.in. |')
-            st.session_state.awaiting = "sub"
+
+            if st.session_state.has_subducts:
+                bot(f"✅ {n} penetration(s).\n\n"
+                    "**What subduct size?** (4, 6, or 8 inches)\n\n"
+                    "| Size | Area Removed |\n|---|---|\n"
+                    '| 4" | 15.0 sq.in. |\n| 6" | 31.5 sq.in. |\n| 8" | 54.0 sq.in. |')
+                st.session_state.awaiting = "sub"
+            else:
+                # No subducts — skip straight to CFM
+                if st.session_state.same_all:
+                    for fd in st.session_state.floor_data:
+                        fd["subduct_size"] = 0
+                else:
+                    st.session_state.floor_data[st.session_state.current_floor]["subduct_size"] = 0
+                bot(f"✅ {n} opening(s) per floor (no subducts).\n\n"
+                    "**How many CFM per opening?**")
+                st.session_state.awaiting = "cfm"
 
         elif aw == "sub":
             try:
@@ -521,9 +1226,9 @@ def process_input(user_input: str):
             if st.session_state.same_all:
                 for fd in st.session_state.floor_data:
                     fd["cfm_per_pen"] = c
-                bot(f"✅ {c} CFM/penetration applied to all {st.session_state.floors} floors.\n\n"
+                bot(f"✅ {c} CFM/opening applied to all {st.session_state.floors} floors.\n\n"
                     "**What is the floor-to-floor height (ft)?**")
-                st.session_state.step = 5
+                st.session_state.step = 7
             else:
                 st.session_state.floor_data[st.session_state.current_floor]["cfm_per_pen"] = c
                 cf = st.session_state.current_floor
@@ -536,10 +1241,10 @@ def process_input(user_input: str):
                 else:
                     bot(f"✅ All {st.session_state.floors} floors configured!\n\n"
                         "**What is the floor-to-floor height (ft)?**")
-                    st.session_state.step = 5
+                    st.session_state.step = 7
 
     # ─── Step 5: Floor height ───
-    elif step == 5:
+    elif step == 6:
         user(val)
         try:
             h = float(val)
@@ -551,10 +1256,10 @@ def process_input(user_input: str):
         bot(f"✅ {h} ft floor-to-floor.\n\n"
             "**Length of duct from the last (top) floor penetration to the exhaust fan (ft)?**\n"
             "(Include all horizontal/vertical run after the highest connection.)")
-        st.session_state.step = 6
+        st.session_state.step = 7
 
     # ─── Step 6: Duct after last ───
-    elif step == 6:
+    elif step == 7:
         user(val)
         try:
             d = float(val)
@@ -567,10 +1272,10 @@ def process_input(user_input: str):
             "**What is the diversity factor?**  \n"
             "Enter a percentage from 20 to 100.  \n"
             "(e.g., 50 = only 50% of connections active simultaneously)")
-        st.session_state.step = 7
+        st.session_state.step = 8
 
     # ─── Step 7: Diversity ───
-    elif step == 7:
+    elif step == 8:
         user(val)
         try:
             dv = float(val.replace("%", ""))
@@ -582,15 +1287,15 @@ def process_input(user_input: str):
         bot(f"✅ {dv}% diversity.\n\n"
             "**Does the shaft offset after the last floor?**  \n"
             "(The shaft must be straight between floors, but can offset above the top floor.)")
-        st.session_state.step = 8
+        st.session_state.step = 9
 
     # ─── Step 8: Offset? ───
-    elif step == 8:
+    elif step == 9:
         user(val)
         if lc in ("yes", "y", "true", "1"):
             st.session_state.has_offset = True
             bot("**How many elbows in the offset?** (typically 2)")
-            st.session_state.step = 9
+            st.session_state.step = 10
             st.session_state.awaiting = "elbows"
         else:
             st.session_state.has_offset = False
@@ -603,10 +1308,10 @@ def process_input(user_input: str):
                 "- **rect_auto** — find optimal rectangular size\n"
                 "- **round_user** — I'll specify a diameter\n"
                 "- **rect_user** — I'll specify rectangular dims")
-            st.session_state.step = 10
+            st.session_state.step = 11
 
     # ─── Step 9: Offset details ───
-    elif step == 9:
+    elif step == 10:
         user(val)
         aw = st.session_state.awaiting
         if aw == "elbows":
@@ -643,31 +1348,31 @@ def process_input(user_input: str):
                 "- **rect_auto** — find optimal rectangular size\n"
                 "- **round_user** — I'll specify a diameter\n"
                 "- **rect_user** — I'll specify rectangular dims")
-            st.session_state.step = 10
+            st.session_state.step = 11
 
     # ─── Step 10: Shape choice ───
-    elif step == 10:
+    elif step == 11:
         user(val)
         if lc in ("round_auto", "rect_auto", "round_user", "rect_user"):
             st.session_state.shape_choice = lc
             if lc == "round_user":
                 bot("**Enter round duct diameter (inches):**")
-                st.session_state.step = 11
+                st.session_state.step = 12
                 st.session_state.awaiting = "diam"
             elif lc == "rect_user":
                 bot("**Enter rectangular dimensions as `width x height` (inches):**\n"
                     "(e.g., 24 x 18)")
-                st.session_state.step = 11
+                st.session_state.step = 12
                 st.session_state.awaiting = "rect"
             else:
                 bot("**Maximum allowable ΔP between bottom & top floors?**  \n"
                     "Max = 0.25 in. WC.  Enter your target (e.g., 0.20):")
-                st.session_state.step = 12
+                st.session_state.step = 13
         else:
             bot("⚠️ Choose: **round_auto**, **rect_auto**, **round_user**, or **rect_user**.")
 
     # ─── Step 11: User size ───
-    elif step == 11:
+    elif step == 12:
         user(val)
         aw = st.session_state.awaiting
         if aw == "diam":
@@ -691,10 +1396,10 @@ def process_input(user_input: str):
             st.session_state.user_rect_b = min(a, b)
         bot("**Maximum allowable ΔP between bottom & top floors?**  \n"
             "Max = 0.25 in. WC.  Enter your target:")
-        st.session_state.step = 12
+        st.session_state.step = 13
 
     # ─── Step 12: Max ΔP → run calculation ───
-    elif step == 12:
+    elif step == 13:
         user(val)
         try:
             dp = float(val)
@@ -723,7 +1428,7 @@ def process_input(user_input: str):
         result = size_shaft(params)
         st.session_state.result = result
         st.session_state.calc_done = True
-        st.session_state.step = 13
+        st.session_state.step = 14
 
         if result["best"] is None:
             bot("❌ **No valid shaft size found.**\n\n"
@@ -733,7 +1438,7 @@ def process_input(user_input: str):
             bot("✅ **Calculation complete!** See the results below. ⬇️")
 
     # ─── Step 13: Post-result ───
-    elif step == 13:
+    elif step == 14:
         user(val)
         if "restart" in lc or "new" in lc or "reset" in lc:
             reset()
@@ -871,36 +1576,84 @@ def render_results():
             })
         st.table(pd.DataFrame(alt_rows))
 
-    # ── Equipment Recommendation ──
-    st.markdown("#### 🔧 Recommended Equipment — LF Systems")
-    if ss.exhaust_type == "Clothes Dryers":
-        equip = {
-            "Exhaust Fan":     "DEF (Dryer Exhaust Fan)",
-            "Booster":         "DBF (Dryer Booster Fan) — if needed",
-            "Controller":      "L150 or L152",
-            "System":          "HRS (High Rise Shaft)",
-            "Subducts":        f'{ss.floor_data[0]["subduct_size"]}" penetrations',
-        }
-    elif ss.exhaust_type == "Bathroom Exhaust":
-        equip = {
-            "Exhaust Fan":     "DEF or inline exhaust fan",
-            "Controller":      "L150 or L152",
-            "System":          "HRS (High Rise Shaft)",
-            "Subducts":        f'{ss.floor_data[0]["subduct_size"]}" penetrations',
-        }
-    else:
-        equip = {
-            "Exhaust Fan":     "DEF or rated kitchen hood exhaust fan",
-            "Controller":      "L150 or L152",
-            "System":          "HRS (High Rise Shaft)",
-            "Subducts":        f'{ss.floor_data[0]["subduct_size"]}" penetrations',
-        }
-    st.table(pd.DataFrame(equip.items(), columns=["Component", "Model / Specification"]))
+    # ── Fan Selection ──
+    st.markdown("#### 🔧 Fan Selection — LF Systems DEF")
+    fan_sel = select_fan(best["design_cfm"], best["dp_total"])
+    ctrl = select_controller(ss.floors)
+
+    qty_label = f'{fan_sel["quantity"]}x ' if fan_sel["quantity"] > 1 else ''
+    fan_data = {
+        "Selected Fan":         f'{qty_label}{fan_sel["model"]}',
+        "Design CFM":           f'{fan_sel["design_cfm"]:,.0f} CFM',
+        "System Static Pressure": f'{fan_sel["system_sp"]:.4f} in. WC',
+        "Available CFM at SP":  f'{fan_sel["available_cfm"]:,.0f} CFM',
+        "Capacity Margin":      f'{fan_sel["margin_pct"]}%',
+        "Voltage":              fan_sel["specs"]["voltage"],
+        "HP":                   fan_sel["specs"]["hp"],
+        "Motor":                fan_sel["specs"]["motor"],
+        "Impeller":             fan_sel["specs"]["impeller"],
+    }
+    if fan_sel["parallel"]:
+        fan_data["CFM per Fan"] = f'{fan_sel["cfm_per_fan"]:,.0f} CFM'
+    st.table(pd.DataFrame(fan_data.items(), columns=["Parameter", "Value"]))
+
+    if fan_sel["parallel"]:
+        st.warning(f'⚠️ Design CFM exceeds single fan capacity. '
+                   f'**{fan_sel["quantity"]} DEF050 fans in parallel** are recommended.')
+
+    # ── Controller Selection ──
+    st.markdown("#### 🎛️ Controller Selection")
+    ctrl_data = {
+        "Controller":    ctrl["model"],
+        "Description":   ctrl["name"],
+        "System":        ctrl["system"],
+        "Accessories":   ctrl["accessories"],
+        "Selection Basis": ctrl["reason"],
+        "Listings":      ctrl["listings"],
+    }
+    st.table(pd.DataFrame(ctrl_data.items(), columns=["Parameter", "Value"]))
+
+    # ── Fan Curve vs System Curve ──
+    st.markdown("#### 📈 Fan Curve vs System Curve")
+    system_curve = compute_system_curve(None, best)
+    chart_png = generate_fan_system_chart(fan_sel, system_curve)
+    st.image(chart_png, use_container_width=True)
 
     st.info(
         "🌐 Visit **[lfsystems.net](https://www.lfsystems.net)** for product specifications, "
         "CAD drawings, and ordering information."
     )
+
+    # ── Download Buttons ──
+    st.markdown("---")
+    st.markdown("#### 📥 Downloads")
+    col_dl1, col_dl2 = st.columns(2)
+
+    with col_dl1:
+        try:
+            pdf_bytes = generate_pdf_report(ss, best, fan_sel, ctrl, chart_png)
+            st.download_button(
+                label="📄 Download PDF Report",
+                data=pdf_bytes,
+                file_name="HRS_Shaft_Sizing_Report.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.error(f"PDF generation error: {e}")
+
+    with col_dl2:
+        try:
+            docx_bytes = generate_csi_spec(ss, best, fan_sel, ctrl)
+            st.download_button(
+                label="📋 Download CSI Spec (23 34 00)",
+                data=docx_bytes,
+                file_name="CSI_23_34_00_HRS_Exhaust_System.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.error(f"CSI spec generation error: {e}")
 
     # ── Engineering Notes ──
     with st.expander("📝 Engineering Notes & Methodology"):
@@ -911,31 +1664,26 @@ def render_results():
 - **Rectangular Equivalence:** Huebscher equation: `De = 1.30·(a·b)^0.625 / (a+b)^0.25`
 - **Hydraulic Diameter:** `Dh = 4·A / P`
 - **Air Density:** 0.075 lb/ft³ (standard conditions)
-- **Fitting Losses:** ASHRAE 2009 Duct Design Chapter 21 coefficients
-  - 90° elbow: K = 0.60
-  - 45° elbow: K = 0.30
-  - Tee branch entry: K = 0.50
-  - Exit/fan entry: K = 1.00
-  - Bellmouth entry: K = 0.03
+- **Fan Selection:** DEF series fans, interpolated from manufacturer fan curve data
+- **Controller:** L150-H for ≤7 stories, L152-M for >7 stories (stack effect mitigation)
 
-**Subduct Area Deductions:**
-| Subduct Size | Area Removed |
-|---|---|
-| 4" | 15.0 sq.in. |
-| 6" | 31.5 sq.in. |
-| 8" | 54.0 sq.in. |
+**Fan Models:**
+| Model | Max CFM | Max SP | Voltage | HP |
+|---|---|---|---|---|
+| DEF004 | 540 | 1.00 | 120V/1ph | 1/2 |
+| DEF008 | 970 | 1.75 | 120V/1ph | 1/2 |
+| DEF015 | 1,860 | 2.00 | 120V/1ph | 1/2 |
+| DEF025 | 2,480 | 2.00 | 120V/1ph | 1 |
+| DEF035 | 4,100 | 2.00 | 208-480V/3ph | 3 |
+| DEF050 | 5,850 | 2.00 | 208-480V/3ph | 5 |
 
 **Notes:**
 - Fan is on the ROOF pulling exhaust air UP through the shaft
 - Shaft must be straight between floors (no offsets between occupied floors)
-- Offsets are only permitted above the highest floor penetration
 - Airflow is CUMULATIVE: bottom of shaft has minimal air, top has maximum
-- Each inter-floor section carries the cumulative CFM from all floors below it
-- Bottom floor sees the lowest ΔP (least air in shaft above it)
-- Top floor sees the highest ΔP (most cumulative friction to overcome)
+- Bottom floor ΔP ≈ 0 (no air in shaft yet); Top floor = maximum accumulated ΔP
 - The HRS system maintains constant negative pressure via EC-Flow Technology™
-- Diversity factor accounts for simultaneous use (typically 20-100%)
-- Maximum allowable ΔP between top and bottom floors: 0.25 in. WC
+- If CFM exceeds single DEF050 capacity, multiple DEF050s are recommended in parallel
         """)
 
 
@@ -1053,17 +1801,19 @@ def main():
     buttons = []
     if step == 1:
         buttons = ["Dryers", "Bathrooms", "Kitchen Hoods"]
-    elif step == 3:
+    elif step == 2:
         buttons = ["Yes", "No"]
-    elif step == 4 and st.session_state.awaiting == "pens":
+    elif step == 4:
+        buttons = ["Yes", "No"]
+    elif step == 5 and st.session_state.awaiting == "pens":
         buttons = ["1", "2"]
-    elif step == 4 and st.session_state.awaiting == "sub":
+    elif step == 5 and st.session_state.awaiting == "sub":
         buttons = ["4", "6", "8"]
-    elif step == 8:
-        buttons = ["Yes", "No"]
     elif step == 10:
+        buttons = ["Yes", "No"]
+    elif step == 12:
         buttons = ["round_auto", "rect_auto", "round_user", "rect_user"]
-    elif step == 13:
+    elif step == 14:
         buttons = ["restart"]
 
     if buttons:
